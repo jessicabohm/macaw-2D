@@ -9,15 +9,10 @@ from ae.encoder import EncoderMMNIST
 from macaw.flows import Flow, NormalizingFlowModel
 
 
-class automacaw_mmnist:
+class mmnist:
 
-    def __init__(self, encoded_dim, macaw_dim=None):
+    def __init__(self, encoded_dim):
         self.encoded_dim = encoded_dim
-
-        if macaw_dim is None:
-            self.macaw_dim = encoded_dim
-        else:
-            self.macaw_dim = macaw_dim
 
         self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         print(f'Selected device: {self.device}')
@@ -33,36 +28,36 @@ class automacaw_mmnist:
         n_layers = 4
         hidden = [4, 6, 4]
 
-        labels_to_latents = [(l, i) for l in range(10) for i in range(13, self.macaw_dim + 13)]
+        labels_to_latents = [(l, i) for l in range(10) for i in range(13, self.encoded_dim + 13)]
         labels_to_area = [(l, 11) for l in range(10)]
         thickness_to_area = [(10, 11)]
-        area_to_latents = [(11, i) for i in range(13, self.macaw_dim + 13)]
-        slant_to_latents = [(12, i) for i in range(13, self.macaw_dim + 13)]
-        autoregressive_latents = [(i, j) for i in range(13, self.macaw_dim + 13) for j in
-                                  range(i + 1, self.macaw_dim + 13)]
+        area_to_latents = [(11, i) for i in range(13, self.encoded_dim + 13)]
+        slant_to_latents = [(12, i) for i in range(13, self.encoded_dim + 13)]
+        autoregressive_latents = [(i, j) for i in range(13, self.encoded_dim + 13) for j in
+                                  range(i + 1, self.encoded_dim + 13)]
 
         edges = labels_to_latents + labels_to_area + thickness_to_area + area_to_latents + slant_to_latents + autoregressive_latents
 
         priors = [(slice(0, 10), td.OneHotCategorical(0.1 * torch.ones(10).to(self.device))),
-                  (slice(10, self.macaw_dim + 13),
-                   td.Normal(torch.zeros(self.macaw_dim + 3).to(self.device),
-                             torch.ones(self.macaw_dim + 3).to(self.device))),
+                  (slice(10, self.encoded_dim + 13),
+                   td.Normal(torch.zeros(self.encoded_dim + 3).to(self.device),
+                             torch.ones(self.encoded_dim + 3).to(self.device))),
                   ]
 
-        flow_list = [Flow(self.macaw_dim + 13, edges, self.device, hm=hidden) for _ in range(n_layers)]
+        flow_list = [Flow(self.encoded_dim + 13, edges, self.device, hm=hidden) for _ in range(n_layers)]
         return NormalizingFlowModel(priors, flow_list).to(self.device)
 
     def _batch_to_x(self, batch):
         image_batch, features_batch, labels_batch = batch[0], batch[1], batch[2]
         latents = self.encoder(image_batch.to(self.device))
-        flow_batch = latents[:, :self.macaw_dim]
+        flow_batch = latents[:, :self.encoded_dim]
         labels_batch = one_hot(labels_batch).to(self.device)
         features_batch = (features_batch.to(self.device) - self.feature_mean) / self.feature_std
         x = torch.hstack([labels_batch, features_batch, flow_batch]).type(torch.float32)
         return x, latents
 
     def _x_to_batch(self, x, latents):
-        latents[:, :self.macaw_dim] = x[:, 13:]
+        latents[:, :self.encoded_dim] = x[:, 13:]
         cfs = np.squeeze(self.decoder(latents).detach().cpu().numpy())
         labels = inverse_one_hot(x[:, :10]).detach().cpu().numpy()
         features = (x[:, 10:13] * self.feature_std + self.feature_mean).detach().cpu().numpy()
@@ -168,90 +163,6 @@ class automacaw_mmnist:
                 loss_val.append(loss.detach().cpu().numpy())
 
         return np.mean(loss_val)
-
-    def train(self, train_loader, alpha=0.01, beta=100, lr=0.005):
-        parameters = [{'params': self.encoder.parameters()},
-                      {'params': self.macaw.parameters()},
-                      {'params': self.decoder.parameters()}]
-
-        optimizer = torch.optim.Adam(parameters, lr=lr)
-        mse_loss_func = torch.nn.MSELoss()
-
-        self.encoder.train()
-        self.macaw.train()
-        self.decoder.train()
-
-        if self.feature_mean is None:
-            self._compute_feature_mean(train_loader)
-
-        nll_loss_val = []
-        mse_loss_val = []
-        for batch in train_loader:
-            image_batch = batch[0].to(self.device)
-            x, latents = self._batch_to_x(batch)
-
-            _, prior_logprob, log_det = self.macaw(x)
-            nll_loss = - torch.sum(prior_logprob + log_det)
-            nll_loss /= train_loader.batch_size
-
-            nll_loss_val.append(nll_loss.detach().cpu().numpy())
-
-            decoded_batch = self.decoder(latents)
-            mse_loss = mse_loss_func(decoded_batch, image_batch)
-            mse_loss_val.append(mse_loss.detach().cpu().numpy())
-
-            loss = alpha * nll_loss + beta * mse_loss
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        return np.mean(nll_loss_val), np.mean(mse_loss_val)
-
-    def test(self, data_loader):
-
-        self.encoder.eval()
-        self.macaw.eval()
-        self.decoder.eval()
-
-        mse_loss_func = torch.nn.MSELoss()
-
-        nll_loss_val = []
-        mse_loss_val = []
-        with torch.no_grad():
-            for batch in data_loader:
-                image_batch = batch[0].to(self.device)
-                x, latents = self._batch_to_x(batch)
-
-                _, prior_logprob, log_det = self.macaw(x)
-                nll_loss = - torch.sum(prior_logprob + log_det)
-                nll_loss /= data_loader.batch_size
-
-                nll_loss_val.append(nll_loss.detach().cpu().numpy())
-
-                decoded_batch = self.decoder(latents)
-                mse_loss = mse_loss_func(decoded_batch, image_batch)
-                mse_loss_val.append(mse_loss.detach().cpu().numpy())
-
-        return np.mean(nll_loss_val), np.mean(mse_loss_val)
-
-    def sample(self, n_samples=5):
-        self.macaw.eval()
-        self.decoder.eval()
-
-        with torch.no_grad():
-            z = np.zeros((n_samples, 45))
-            for sl, dist in self.macaw.priors:
-                z[:, sl] = dist.sample((n_samples,)).cpu().detach().numpy()
-
-            samples = self.macaw.backward(torch.tensor(z.astype(np.float32)).to(self.device))[0][
-                -1]
-
-            images = np.squeeze(self.decoder(samples[:, 13:]).detach().cpu().numpy())
-            labels = inverse_one_hot(samples[:, :10]).detach().cpu().numpy()
-            features = (samples[:, 10:13] * self.feature_std + self.feature_mean).detach().cpu().numpy()
-
-            return images, features, labels
 
     def _cf(self, x_obs, cf_vals):
         self.macaw.eval()
