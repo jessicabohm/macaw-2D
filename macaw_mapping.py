@@ -30,7 +30,7 @@ class macaw_mapping:
 
     def _init_macaw(self):
     
-        n_layers = 4
+        n_layers = 1
         hidden = [4, 6, 4]
 
         self.num_nodes = 5
@@ -72,10 +72,10 @@ class macaw_mapping:
         return x, flow_batch
 
     def _x_to_batch(self, x, latents):
-        latents[:, :] = x[:, :self.encoded_dim]
+        latents[:, :] = x[:, self.num_nodes:]
         cfs = latents.detach().cpu().numpy() # also just don't decode here
         labels = inverse_one_hot(x[:, :self.num_species]).detach().cpu().numpy()
-        features = (x[:, self.encoded_dim + self.num_species : self.encoded_dim + self.num_nodes] * self.feature_std + self.feature_mean).detach().cpu().numpy()
+        features = (x[:, self.num_species:self.num_nodes] * self.feature_std + self.feature_mean).detach().cpu().numpy()
         return [cfs, features, labels]
 
     def _compute_feature_mean(self, train_loader):
